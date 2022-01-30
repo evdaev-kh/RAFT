@@ -91,6 +91,8 @@ type Raft struct {
 	leader     bool
 
 	applyCh chan ApplyMsg
+
+	debug bool
 }
 
 /* Data Structure of Each Log Entry */
@@ -202,6 +204,12 @@ type RequestVoteReply struct {
 	VoteGranted bool //true means candidate received vote
 }
 
+func log_print(debug_level int, msg string) {
+	if debug_level == 1 {
+		fmt.Println(msg)
+	}
+}
+
 //
 // example RequestVote RPC handler.
 //
@@ -218,13 +226,18 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			if len(rf.log)-1 <= args.LastLogIndex {
 				//Server requesting vote does not have a higher term but I have not voted!
 				reply.VoteGranted = true
+
+				if rf.debug 
 				fmt.Println("Server ", rf.me, ": I have not voted and the candidate's log is up to date with mine")
+				
 				rf.votedFor = args.CandidateId
 				rf.currentTerm = args.Term
 				rf.leader = false
 				rf.heartbeat = true //reset the timer when woken up
 			} else {
+				if rf.debug {
 				fmt.Println("Server ", rf.me, ": The candidate's log is shorter than mine!")
+				}
 				reply.VoteGranted = false
 			}
 		} else {
