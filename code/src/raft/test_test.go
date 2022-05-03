@@ -8,12 +8,14 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
-import "fmt"
-import "time"
-import "math/rand"
-import "sync/atomic"
-import "sync"
+import (
+	"fmt"
+	"math/rand"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -185,12 +187,11 @@ func TestFailAgree2B(t *testing.T) {
 	cfg.begin("Test (2B): agreement despite follower disconnection")
 
 	cfg.one(101, servers, false)
-	
 
 	// disconnect one follower from the network.
 	leader := cfg.checkOneLeader()
 	cfg.disconnect((leader + 1) % servers)
-	fmt.Println("Tester: disconnect server ", (leader + 1) % servers)
+	fmt.Println("Tester: disconnect server ", (leader+1)%servers)
 
 	// the leader and remaining follower should be
 	// able to agree despite the disconnected follower.
@@ -199,17 +200,16 @@ func TestFailAgree2B(t *testing.T) {
 	time.Sleep(RaftElectionTimeout)
 	cfg.one(104, servers-1, false)
 	cfg.one(105, servers-1, false)
-	
 
 	// re-connect
 	cfg.connect((leader + 1) % servers)
-	fmt.Println("Tester: reconnected server ", (leader + 1) % servers)
+	fmt.Println("Tester: reconnected server ", (leader+1)%servers)
 
 	// the full set of servers should preserve
 	// previous agreements, and be able to agree
 	// on new commands.
 	cfg.one(106, servers, true)
-	
+
 	time.Sleep(RaftElectionTimeout)
 	cfg.one(107, servers, true)
 
@@ -376,7 +376,6 @@ func TestRejoin2B(t *testing.T) {
 	cfg.begin("Test (2B): rejoin of partitioned leader")
 
 	cfg.one(101, servers, true)
-	
 
 	// leader network failure
 	leader1 := cfg.checkOneLeader()
@@ -396,21 +395,19 @@ func TestRejoin2B(t *testing.T) {
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)
 	fmt.Println("Tester: Disconnected leader 2", leader2)
-	
-	
+
 	// old leader connected again
 	cfg.connect(leader1)
 	fmt.Println("Tester: Reconnected leader 1", leader1)
 	fmt.Println("Tester: Leader 2 is ", leader2)
 	//return
-	
+
 	fmt.Println("Tester: Entry with command 104 index = 2?")
 	fmt.Println("Tester: Leader 1 is ", leader1)
 	fmt.Println("Tester: Leader 2 is ", leader2)
 	//time.Sleep(RaftElectionTimeout)
 	cfg.one(104, 2, true)
 	//return
-	
 
 	// all together now
 	cfg.connect(leader2)

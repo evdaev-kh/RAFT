@@ -106,18 +106,11 @@ type LogEntry struct {
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 
-	var term int
-	var isleader bool
-
 	// Your code here (2A).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
-	term = rf.currentTerm
-	isleader = false
-	if rf.leader == true {
-		isleader = true
-	}
+	var term = rf.currentTerm
+	var isleader = rf.leader
 	//fmt.Println("Server ", rf.me, " current term: ", term)
 	//fmt.Println("Server ", rf.me, "am I the leader? ", isleader)
 
@@ -227,23 +220,19 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 				//Server requesting vote does not have a higher term but I have not voted!
 				reply.VoteGranted = true
 
-				if rf.debug 
-				fmt.Println("Server ", rf.me, ": I have not voted and the candidate's log is up to date with mine")
-				
+				//fmt.Println("Server ", rf.me, ": I have not voted and the candidate's log is up to date with mine")
 				rf.votedFor = args.CandidateId
 				rf.currentTerm = args.Term
 				rf.leader = false
 				rf.heartbeat = true //reset the timer when woken up
 			} else {
-				if rf.debug {
-				fmt.Println("Server ", rf.me, ": The candidate's log is shorter than mine!")
-				}
+				//fmt.Println("Server ", rf.me, ": The candidate's log is shorter than mine!")
 				reply.VoteGranted = false
 			}
 		} else {
 			//Server requesting vote does not have a higher term but I have not voted!
 			reply.VoteGranted = true
-			fmt.Println("Server ", rf.me, ": I have not voted and the candidate's log is up to date with mine")
+			//fmt.Println("Server ", rf.me, ": I have not voted and the candidate's log is up to date with mine")
 			rf.votedFor = args.CandidateId
 			rf.currentTerm = args.Term
 			rf.leader = false
@@ -705,6 +694,173 @@ func (rf *Raft) ticker() {
 	}
 }
 
+func requestVotes(term_ int, id_ int, peer_id int, channel chan string, rf *Raft) {
+	//Create the RPC Arguments and Results
+	args := RequestVoteArgs{}
+	args.Term = term_
+	args.CandidateId = id_
+	rf.mu.Lock()
+	if len(rf.log) != 0 {
+		args.LastLogIndex = len(rf.log) - 1
+		args.LastLogTerm = rf.log[args.LastLogIndex].Term
+	} else {
+		args.LastLogIndex = 0
+		args.LastLogTerm = 0
+	}
+	rf.mu.Unlock()
+
+	result := RequestVoteReply{}
+	// Information about the RPC
+	// fmt.Println("Server ", rf.me, " about to send an RPC")
+	// fmt.Println("Server ", rf.me, " term: ", args.Term)
+	// fmt.Println("Server ", rf.me, " candidateId: ", args.CandidateId)
+	// fmt.Println("Server ", rf.me, " lastLogIndex: ", args.LastLogIndex)
+	// fmt.Println("Server ", rf.me, " lastLogTerm: ", args.LastLogTerm)
+	// fmt.Println("Server ", rf.me, " last log term in log[]: ", rf.log[args.LastLogIndex].Term)
+	// fmt.Println("Server ", id, " sending a RequestElectionRPC to peer: ", peer_id)
+	result_ := rf.sendRequestVote(peer_id, &args, &result)
+	if result_ {
+		if result.VoteGranted == true {
+			channel <- "success"
+		}
+	} else {
+		channel <- "failure"
+	}
+}
+
+func Heartbeats(term_ int, my_id_ int, num_peers int, rf *Raft) {
+	rf.mu.Lock()
+	leader_flag := rf.leader
+	fmt.Println("Server ", my_id_, ": should I send a heartbeat?")
+	fmt.Println("Server ", my_id_, ": flag is ", leader_flag)
+	rf.mu.Unlock()
+	for leader_flag == true && rf.killed() == false {
+
+		for p := 0; p < num_peers; p++ {
+
+			if p != my_id_ {
+
+				go func(id int, term int, peer int) {
+					//Now need to send heartbeats
+					args := AppendEntriesArgs{}
+					args.Term = term
+					args.LeaderId = id
+
+					/* Need to include Commit Index with heartbeats */
+					/* Is this a possible source of failure? */
+					rf.mu.Lock()
+					args.LeaderCommit = rf.commitIndex
+					rf.mu.Unlock()
+
+					reply := AppendEntriesReply{}
+					//fmt.Println("Server ", my_id_, " sending a heartbeat to Server ", peer)
+					rf.sendAppendEntries(peer, &args, &reply)
+					fmt.Println("Server ", my_id_, " sent a heartbeat to Server ", peer)
+					return
+				}(my_id_, term_, p)
+			}
+		}
+
+		//Now need to sleep
+		r := rand.New(rand.NewSource(time.Now().UnixNano()))
+		t := (time.Duration)(50+r.Float64()*20) * time.Millisecond
+		//fmt.Println("Server ", my_id_, ": going to sleep for ", t, " seconds in the heartbeat go routine")
+		time.Sleep(t)
+		fmt.Println("Server ", my_id_, ": woke up in the heartbeat go routine")
+		rf.mu.Lock()
+		leader_flag = rf.leader
+		fmt.Println("Server ", my_id_, ": am I leader? ", leader_flag)
+		//sent_heartbeat = false
+		rf.mu.Unlock()
+
+	}
+	//fmt.Println("Server ", my_id_, " I am no longer the leader!")
+	rf.mu.Lock()
+	rf.leader = false
+	rf.mu.Unlock()
+	return
+}
+
+func InitializeElection(id int, term int, num_peers int, rf *Raft) {
+	//Set the initial count of votes to 1
+	count := 1
+
+	//Step 1: Go routine to requestVotes to peers
+	c1 := make(chan string, num_peers-1)
+	for p := 0; p < num_peers; p++ {
+		if p != id {
+			go func(term_ int, id_ int, peer_id int, channelVote chan string, rf *Raft) {
+				requestVotes(term_, id, peer_id, channelVote, rf)
+			}(term, id, p, c1, rf)
+
+		}
+	}
+
+	//Now wait for the results from peers
+	for i := 0; i < num_peers-1; i++ {
+		r0 := rand.New(rand.NewSource(time.Now().UnixNano()))
+		rf.mu.Lock()
+		if rf.votedFor != rf.me {
+			rf.mu.Unlock()
+			//fmt.Println("Server ", rf.me, ": Have already voted! No need to look at results from my requests!")
+			return
+		}
+		rf.mu.Unlock()
+		select {
+		case res := <-c1:
+			if res == "success" {
+				//fmt.Println("Server ", id, " got a positive result")
+				count++
+			}
+
+		case <-time.After((time.Duration)(r0.Float64()*10) * time.Millisecond):
+			//fmt.Println("Server ", id, " timeout for the result from RequestVoteRPC")
+		}
+	}
+
+	//Won Election!
+	if count >= rf.majority {
+
+		//fmt.Println("Server ", id, ": I have been elected a leader!")
+		rf.mu.Lock()
+		rf.leader = true
+		//last_applied := rf.lastApplied + 1
+		//fmt.Println("Server ", id, ": resetting all match indices to ", len(rf.log))
+		for i := 0; i < len(rf.peers); i++ {
+			rf.matchIndex = append(rf.matchIndex, 0) //Setting up these two arrays for the leader
+			rf.nextIndex = append(rf.nextIndex, len(rf.log))
+		}
+		rf.mu.Unlock()
+		//fmt.Println("Server ", id, ": need to send heartbeats now?!")
+
+		//Need to send heartbeats periodically
+		go func(term_ int, my_id_ int, num_peers int, rf *Raft) {
+			Heartbeats(term, my_id_, num_peers, rf)
+
+		}(term, id, num_peers, rf)
+
+		rf.mu.Lock()
+		if len(rf.log) == 0 {
+			log0 := LogEntry{}
+			log0.Term = 0
+			log0.Valid = false
+			rf.log = append(rf.log, &log0)
+			//fmt.Println("Server ", rf.me, ": initialized the log with dummy entry, and the log length is - ", len(rf.log))
+			//fmt.Println("Server ", rf.me, ": sent the dummy log entry for replication!")
+			go func() {
+				rf.log_replicate(&log0)
+			}()
+		}
+		rf.mu.Unlock()
+	} else {
+		//Did not win the election so reset votedFor back to null (i.e. 999)
+		//fmt.Println("Server ", rf.me, " did not win an election so changing votedFor back to 999")
+		rf.mu.Lock()
+		rf.votedFor = 999
+		rf.mu.Unlock()
+	}
+}
+
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -735,7 +891,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	finished := false
 	rf.leader = false
 
-	//Add a go routine to initialize an election
+	//Add a go routine for leader election purposes
 	go func() {
 
 		//fmt.Println("Server ", rf.me, ": number of peers: ", len(rf.peers))
@@ -768,167 +924,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				rf.votedFor = rf.me //vote for myself
 				//rf.mu.Unlock()
 
-				go func(id int, term int, num_peers int) {
-
-					//Set the initial count of votes to 1
-					count := 1
-
-					c1 := make(chan string, num_peers-1)
-
-					for p := 0; p < num_peers; p++ {
-						if p != id {
-							go func(term_ int, id_ int, peer_id int) {
-
-								//Create the RPC Arguments and Results
-								args := RequestVoteArgs{}
-								args.Term = term_
-								args.CandidateId = id_
-								rf.mu.Lock()
-								if len(rf.log) != 0 {
-									args.LastLogIndex = len(rf.log) - 1
-									args.LastLogTerm = rf.log[args.LastLogIndex].Term
-								} else {
-									args.LastLogIndex = 0
-									args.LastLogTerm = 0
-								}
-								rf.mu.Unlock()
-
-								result := RequestVoteReply{}
-								// Information about the RPC
-								// fmt.Println("Server ", rf.me, " about to send an RPC")
-								// fmt.Println("Server ", rf.me, " term: ", args.Term)
-								// fmt.Println("Server ", rf.me, " candidateId: ", args.CandidateId)
-								// fmt.Println("Server ", rf.me, " lastLogIndex: ", args.LastLogIndex)
-								// fmt.Println("Server ", rf.me, " lastLogTerm: ", args.LastLogTerm)
-								// fmt.Println("Server ", rf.me, " last log term in log[]: ", rf.log[args.LastLogIndex].Term)
-								// fmt.Println("Server ", id, " sending a RequestElectionRPC to peer: ", peer_id)
-								result_ := rf.sendRequestVote(peer_id, &args, &result)
-								if result_ {
-									if result.VoteGranted == true {
-										c1 <- "success"
-									}
-								} else {
-									c1 <- "failure"
-								}
-
-							}(term, id, p)
-
-						}
-					}
-
-					//Now wait for the results
-					for i := 0; i < num_peers-1; i++ {
-						r0 := rand.New(rand.NewSource(time.Now().UnixNano()))
-						rf.mu.Lock()
-						if rf.votedFor != rf.me {
-							rf.mu.Unlock()
-							//fmt.Println("Server ", rf.me, ": Have already voted! No need to look at results from my requests!")
-							return
-						}
-						rf.mu.Unlock()
-						select {
-						case res := <-c1:
-							if res == "success" {
-								//fmt.Println("Server ", id, " got a positive result")
-								count++
-							}
-
-						case <-time.After((time.Duration)(r0.Float64()*10) * time.Millisecond):
-							//fmt.Println("Server ", id, " timeout for the result from RequestVoteRPC")
-						}
-					}
-
-					//Won Election!
-					if count >= rf.majority {
-
-						//fmt.Println("Server ", id, ": I have been elected a leader!")
-						rf.mu.Lock()
-						rf.leader = true
-						//last_applied := rf.lastApplied + 1
-						//fmt.Println("Server ", id, ": resetting all match indices to ", len(rf.log))
-						for i := 0; i < len(rf.peers); i++ {
-							rf.matchIndex = append(rf.matchIndex, 0) //Setting up these two arrays for the leader
-							rf.nextIndex = append(rf.nextIndex, len(rf.log))
-						}
-						rf.mu.Unlock()
-						//fmt.Println("Server ", id, ": need to send heartbeats now?!")
-
-						//Need to send heartbeats periodically
-						go func(term_ int, my_id_ int, num_peers int) {
-
-							rf.mu.Lock()
-							leader_flag := rf.leader
-							fmt.Println("Server ", my_id_, ": should I send a heartbeat?")
-							fmt.Println("Server ", my_id_, ": flag is ", leader_flag)
-							rf.mu.Unlock()
-							for leader_flag == true && rf.killed() == false {
-
-								for p := 0; p < num_peers; p++ {
-
-									if p != my_id_ {
-
-										go func(id int, term int, peer int) {
-											//Now need to send heartbeats
-											args := AppendEntriesArgs{}
-											args.Term = term
-											args.LeaderId = id
-
-											/* Need to include Commit Index with heartbeats */
-											/* Is this a possible source of failure? */
-											rf.mu.Lock()
-											args.LeaderCommit = rf.commitIndex
-											rf.mu.Unlock()
-
-											reply := AppendEntriesReply{}
-											//fmt.Println("Server ", my_id_, " sending a heartbeat to Server ", peer)
-											rf.sendAppendEntries(peer, &args, &reply)
-											fmt.Println("Server ", my_id_, " sent a heartbeat to Server ", peer)
-											return
-										}(my_id_, term_, p)
-									}
-								}
-
-								//Now need to sleep
-								r := rand.New(rand.NewSource(time.Now().UnixNano()))
-								t := (time.Duration)(50+r.Float64()*20) * time.Millisecond
-								//fmt.Println("Server ", my_id_, ": going to sleep for ", t, " seconds in the heartbeat go routine")
-								time.Sleep(t)
-								fmt.Println("Server ", my_id_, ": woke up in the heartbeat go routine")
-								rf.mu.Lock()
-								leader_flag = rf.leader
-								fmt.Println("Server ", my_id_, ": am I leader? ", leader_flag)
-								//sent_heartbeat = false
-								rf.mu.Unlock()
-
-							}
-							//fmt.Println("Server ", my_id_, " I am no longer the leader!")
-							rf.mu.Lock()
-							rf.leader = false
-							rf.mu.Unlock()
-							return
-						}(term, id, num_peers)
-
-						rf.mu.Lock()
-						if len(rf.log) == 0 {
-							log0 := LogEntry{}
-							log0.Term = 0
-							log0.Valid = false
-							rf.log = append(rf.log, &log0)
-							//fmt.Println("Server ", rf.me, ": initialized the log with dummy entry, and the log length is - ", len(rf.log))
-							//fmt.Println("Server ", rf.me, ": sent the dummy log entry for replication!")
-							go func() {
-								rf.log_replicate(&log0)
-							}()
-						}
-						rf.mu.Unlock()
-					} else { //Did not win the election so reset votedFor back to null (i.e. 999)
-						//fmt.Println("Server ", rf.me, " did not win an election so changing votedFor back to 999")
-						rf.mu.Lock()
-						rf.votedFor = 999
-						rf.mu.Unlock()
-					}
-					//rf.mu.Unlock()
-				}(rf.me, rf.currentTerm, len(rf.peers))
+				go func(id int, term int, num_peers int, rf *Raft) {
+					InitializeElection(rf.me, rf.currentTerm, len(rf.peers), rf)
+				}(rf.me, rf.currentTerm, len(rf.peers), rf)
 				rf.mu.Unlock()
 
 				//No need for an election because a heartbeat was received?
