@@ -90,6 +90,9 @@ type Raft struct {
 	matchIndex []int //for each server, index of the highest log entry KNOWN to be REPLICATED on server
 	leader     bool
 
+	/*Volatile State on Followers */
+	lastAppendEntriesID int
+
 	applyCh chan ApplyMsg
 
 	debug bool
@@ -111,8 +114,6 @@ func (rf *Raft) GetState() (int, bool) {
 	defer rf.mu.Unlock()
 	var term = rf.currentTerm
 	var isleader = rf.leader
-	//fmt.Println("Server ", rf.me, " current term: ", term)
-	//fmt.Println("Server ", rf.me, "am I the leader? ", isleader)
 
 	return term, isleader
 }
@@ -211,41 +212,28 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
-		fmt.Println("Server ", rf.me, ": candidate's term - ", args.Term, " -- is less than mine -- ", rf.currentTerm)
+		//fmt.Println("Server ", rf.me, ": server", args.CandidateId, "term - ", args.Term, " -- is less than mine -- ", rf.currentTerm)
 		reply.VoteGranted = false
-	} else if (rf.votedFor == 999 || rf.votedFor == args.CandidateId) && (len(rf.log) == 0 || (rf.log[len(rf.log)-1].Term <= args.LastLogTerm)) {
+	} else if (rf.votedFor == 999 || rf.votedFor == args.CandidateId) && (len(rf.log) == 0 || (rf.log[len(rf.log)-1].Term == args.LastLogTerm && len(rf.log) <= args.LastLogIndex+1) || (args.LastLogTerm > rf.log[len(rf.log)-1].Term)) {
+		//fmt.Println("Server", rf.me, " granting vote to ", args.CandidateId)
+		reply.VoteGranted = true
+		rf.votedFor = args.CandidateId
+		rf.currentTerm = args.Term
+		rf.leader = false
+		rf.heartbeat = true //reset the timer when woken up
 
-		if len(rf.log) != 0 && (rf.log[len(rf.log)-1].Term == args.LastLogTerm) {
-			if len(rf.log)-1 <= args.LastLogIndex {
-				//Server requesting vote does not have a higher term but I have not voted!
-				reply.VoteGranted = true
-
-				//fmt.Println("Server ", rf.me, ": I have not voted and the candidate's log is up to date with mine")
-				rf.votedFor = args.CandidateId
-				rf.currentTerm = args.Term
-				rf.leader = false
-				rf.heartbeat = true //reset the timer when woken up
-			} else {
-				//fmt.Println("Server ", rf.me, ": The candidate's log is shorter than mine!")
-				reply.VoteGranted = false
-			}
-		} else {
-			//Server requesting vote does not have a higher term but I have not voted!
-			reply.VoteGranted = true
-			//fmt.Println("Server ", rf.me, ": I have not voted and the candidate's log is up to date with mine")
-			rf.votedFor = args.CandidateId
-			rf.currentTerm = args.Term
-			rf.leader = false
-			rf.heartbeat = true //reset the timer when woken up
-		}
 	} else {
 		//Candidate's log is not up to date or I have already voted
-		//fmt.Println("Server ", rf.me, ": The candidate's log is not up to date or I have already voted")
+		// fmt.Println("Server ", rf.me, ": server", args.CandidateId, "log is not up to date or I have already voted")
+		// fmt.Println("Server ", rf.me, " votedfor: ", rf.votedFor)
+		// fmt.Println("Candidate's last log term: ", args.LastLogTerm)
+		// fmt.Println("Candidate's log size: ", args.LastLogIndex+1)
+		//fmt.Println("My last log temr: ", rf.log[len(rf.log)-1].Term)
+		//fmt.Println("My log size: ", len(rf.log))
 		reply.VoteGranted = false
 	}
 	reply.Term = rf.currentTerm
-
-	//?????: What to do with my current term?
+	//fmt.Println("Server ", rf.me, " set return term: ", reply.Term)
 
 }
 
@@ -269,31 +257,33 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 
 	rf.mu.Lock()
-	fmt.Println("Server ", rf.me, " I received an Appendentries RPC from ", args.LeaderId)
+	//fmt.Println("Server ", rf.me, " I received an Appendentries RPC from ", args.LeaderId)
 	if (len(args.Entries) == 0 && rf.leader == false && (args.LeaderCommit >= rf.commitIndex)) || (len(args.Entries) == 0 && rf.leader == true && (args.Term >= rf.currentTerm)) {
-		//Regular heartbeat for a follower
-		fmt.Println("Server ", rf.me, " I got a heartbeat from Server: ", args.LeaderId)
+		//Heartbeat RPC
+		fmt.Println("AE1: Heartbeat")
+		//fmt.Println("Server ", rf.me, " I got a heartbeat from Server: ", args.LeaderId)
 		rf.votedFor = args.LeaderId
 		rf.currentTerm = args.Term
 		rf.heartbeat = true
-		fmt.Println("Server ", rf.me, " set the heartbeat to ", rf.heartbeat)
 		rf.leader = false
 
-		if args.LeaderCommit > rf.commitIndex {
+		if args.LeaderCommit > rf.commitIndex && rf.lastAppendEntriesID == args.LeaderId {
 
-			fmt.Println("Server ", rf.me, ": leader has a higher commitindex than me!")
+			fmt.Println("Server ", rf.me, ": leader has a higher commitindex", args.LeaderCommit, "than me!")
 			fmt.Println("Server ", rf.me, " current lastApplied", rf.lastApplied)
 			fmt.Println("Server ", rf.me, " current commitIndex", rf.commitIndex)
+			fmt.Println("Server ", rf.me, " checking whether it is safe to replicate")
 
 			if args.LeaderCommit < len(rf.log)-1 {
 				rf.commitIndex = args.LeaderCommit
 			} else {
 				rf.commitIndex = len(rf.log) - 1
 			}
+			//rf.lastAppendEntriesID = 999
 			fmt.Println("Server ", rf.me, ": updated commitIndex to ", rf.commitIndex)
 		}
 
-		if rf.lastApplied < rf.commitIndex {
+		if rf.lastApplied <= rf.commitIndex {
 			for e := rf.lastApplied + 1; e < rf.commitIndex+1; e++ {
 				apply_msg := ApplyMsg{}
 				apply_msg.CommandValid = rf.log[e].Valid
@@ -306,33 +296,45 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 
 	} else if args.Term < rf.currentTerm {
-		fmt.Println("Server ", rf.me, " Got an append entries from outdated leader: ", args.LeaderId)
-		fmt.Println("Server ", rf.me, "My term: ", rf.currentTerm, ". Leader's term: ", args.Term)
-		fmt.Println("Server ", rf.me, "My commit index ", rf.commitIndex, " leader's commit index ", args.LeaderCommit)
-		fmt.Println("Server ", rf.me, "Am I leader? ", rf.leader)
-		fmt.Println("Server ", rf.me, "Length of entries is ", len(args.Entries))
+		//Outdated Leader Case 1: I am a follower receiving an RPC from an outdated leader
+		fmt.Println("AE2: Outdated Leader 1")
+		// fmt.Println("Server ", rf.me, " Got an append entries from outdated leader: ", args.LeaderId)
+		// fmt.Println("Server ", rf.me, "My term: ", rf.currentTerm, ". Leader's term: ", args.Term)
+		// fmt.Println("Server ", rf.me, "My commit index ", rf.commitIndex, " leader's commit index ", args.LeaderCommit)
+		// fmt.Println("Server ", rf.me, "Am I leader? ", rf.leader)
+		// fmt.Println("Server ", rf.me, "Length of entries is ", len(args.Entries))
 		reply.Success = false
 		reply.Term = rf.currentTerm
 
 	} else if (args.Term >= rf.currentTerm) && (rf.leader == true) {
-		//Append Entry from a new leader
-		fmt.Println("Server ", rf.me, ": I got a heartbeat from a new leader! Reverting my leader status and becoming a follower")
+		//Outdated Leader Case 2: I am a leader receiving an RPC from a leader with a higher term
+		fmt.Println("AE3: Outdated Leader 2")
+		//fmt.Println("Server ", rf.me, ": I got a heartbeat from a new leader! Reverting my leader status and becoming a follower")
 		rf.leader = false
 		rf.currentTerm = args.Term
 		rf.votedFor = args.LeaderId
 		rf.heartbeat = true
 	} else if len(rf.log) == 0 && args.PrevLogTerm == 0 {
+		//Dummy Entry Enforced by the Tester for RAFT
+		fmt.Println("AE4: Dummy Entry")
 		fmt.Println("Server ", rf.me, ": received the dummy log entry!")
-
 		rf.log = append(rf.log, args.Entries[0])
 		reply.Success = true
 
 	} else if (args.PrevLogIndex <= len(rf.log)-1) && (rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
+		fmt.Println("AE5: Mismatched Entry")
 		fmt.Println("Server ", rf.me, "The previous log entry mismatches with the term of the leader so sending false message!")
 		fmt.Println("Server ", rf.me, ": leader PrevTerm ", args.PrevLogTerm, " and my prevTerm", rf.log[args.PrevLogIndex].Term)
 		fmt.Println("Server ", rf.me, ": need to find the last mismatched index for that term")
 
 		my_prev_term := rf.log[args.PrevLogIndex].Term
+
+		//WHY IS THIS NECESSARY?
+		if my_prev_term == 0 || args.PrevLogIndex == 0 {
+			fmt.Println("My prev term is 0 or PrevLogIndex is 0 so sending index 1")
+			reply.Index = 1
+		}
+
 		for i := args.PrevLogIndex; i >= 0; i-- {
 			if rf.log[i].Term < my_prev_term {
 				fmt.Println("Server ", rf.me, ": found the log entry with first occurance", rf.log[i].Term, "less than my prevTerm:  ", my_prev_term)
@@ -341,45 +343,51 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				break
 			}
 		}
-		if my_prev_term == 0 || args.PrevLogIndex == 0 {
-			fmt.Println("My prev term is 0 or PrevLogIndex is 0 so sending index 1")
-			reply.Index = 1
-		}
+
 		reply.Index = args.PrevLogIndex
 		reply.Success = false
 		reply.Term = rf.currentTerm
 
 	} else if args.PrevLogIndex > len(rf.log)-1 {
+		fmt.Println("AE6: Log Index of Sender Too High")
 		reply.Index = len(rf.log)
 		reply.Success = false
 		reply.Term = rf.currentTerm
 	} else {
+		fmt.Println("AE7: Valid Entry Received")
 		fmt.Println("Server ", rf.me, ": received an AppendEntries from a legitimate leader with up-to-date logs!")
 		fmt.Println("Server ", rf.me, ": The log entry is valid!")
 
 		/* Step 1: Copy the new Entries Efficiently */
 		// Create a new copy of the log from 0 to last matching index with the leader
 		entry_ := rf.log[0 : args.PrevLogIndex+1]
+		fmt.Println("Length of RPC entry: ", len(args.Entries))
 		fmt.Println("Length of entry_ ", len(entry_))
 		fmt.Println("Previndex: ", args.PrevLogIndex)
-		fmt.Println("I have: ", rf.log[len(rf.log)-1].Term)
+		fmt.Println("My prevTerm: ", rf.log[len(rf.log)-1].Term)
 
 		for j := 0; j < len(args.Entries); j++ {
 			entry_ = append(entry_, args.Entries[j]) //copy the subsequent entries
-			fmt.Println("Server ", rf.me, "stored: ", entry_[j+1].Command, entry_[j+1].Term, " at index ")
+			fmt.Println("Server ", rf.me, "stored: ", entry_[len(entry_)-1].Command, entry_[len(entry_)-1].Term)
 		}
 		rf.log = entry_ //renew the log stored
 		reply.Success = true
 
-		/* Step 2: Check which commands it we stored */
+		/* Step 2: Check which commands we stored */
 		for k := args.PrevLogIndex + 1; k < len(rf.log); k++ {
 			fmt.Println("Server ", rf.me, "entry ", k, ": command ", rf.log[k].Command, " term ", rf.log[k].Term)
 		}
+
+		rf.lastAppendEntriesID = args.LeaderId
 		/* Step 3: Check whether to update the commit index */
 		//Try to update the commit index
 		if args.LeaderCommit > rf.commitIndex {
+			fmt.Println("Server ", rf.me, ": leader has a higher commitindex", args.LeaderCommit, "than me!")
+			fmt.Println("Server ", rf.me, " current lastApplied", rf.lastApplied)
+			fmt.Println("Server ", rf.me, " current commitIndex", rf.commitIndex)
+			fmt.Println("Server ", rf.me, " checking whether it is safe to replicate")
 
-			if args.LeaderCommit < rf.lastApplied {
+			if args.LeaderCommit < len(rf.log)-1 {
 				rf.commitIndex = args.LeaderCommit
 			} else {
 				rf.commitIndex = len(rf.log) - 1
@@ -388,7 +396,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		}
 
-		if rf.lastApplied < rf.commitIndex {
+		if rf.lastApplied <= rf.commitIndex {
 			for e := rf.lastApplied + 1; e < rf.commitIndex+1; e++ {
 				apply_msg := ApplyMsg{}
 				apply_msg.CommandValid = rf.log[e].Valid
@@ -401,6 +409,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 	rf.mu.Unlock()
+	//fmt.Println("Unlocked lock")
 }
 
 //
@@ -465,6 +474,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// Your code here (2B).
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if rf.leader == true {
 		// fmt.Println("Server ", rf.me, " I am beginning appendEntries!")
 		// fmt.Println("Server ", rf.me, ": entry received from user -- ", command)
@@ -493,7 +503,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		isLeader = false
 	}
 
-	rf.mu.Unlock()
+	//fmt.Println("Unlocked lock")
 	return index, term, isLeader
 }
 
@@ -502,58 +512,41 @@ func (rf *Raft) log_replicate(entry *LogEntry) {
 	//fmt.Println("Server ", rf.me, " need to replicate entry ", entry.Command, "with term: ", entry.Term)
 
 	rf.mu.Lock()
-	term := rf.currentTerm
 	leader_id := rf.me
-	prevEntry := len(rf.log) - 1       //prev entry index
-	length_log := len(rf.log)          //length of the log
-	prevTerm := rf.log[prevEntry].Term //term of the previous log entry
-	entries := rf.log                  //copy entire entries
-	leader_commit := rf.commitIndex    //commit index
-	len := len(rf.peers)               //number of peers
-	majority := rf.majority            //majority
-
-	// Maybe also check whether I am the leader??
-
+	Len := len(rf.peers)    //number of peers
+	majority := rf.majority //majority
 	rf.mu.Unlock()
 
 	messages := make(chan string)
 
 	/* Setting up the go routines to send AppendEntries to each server */
-	for p := 0; p < len; p++ {
+	for p := 0; p < Len; p++ {
 
-		if rf.me != p {
-			go func(term int, leader_id int, prevEntry int, prevTerm int, entries []*LogEntry, leader_commit int, entry *LogEntry, majority int, peer int) {
+		if leader_id != p {
+			go func(leader_id int, entry *LogEntry, majority int, peer int) {
 
 				//index := prevEntry - 1
 				done_ := false
-
 				for done_ != true {
 					args := AppendEntriesArgs{}
 					reply := AppendEntriesReply{}
 
-					args.Term = term          //Send my current Term
-					args.LeaderId = leader_id //Send my leader ID
 					rf.mu.Lock()
-					args.PrevLogIndex = rf.nextIndex[peer] - 1 //Send the index of the previous log entry
-					rf.mu.Unlock()
+					args.Term = rf.currentTerm
+					args.LeaderId = leader_id                  //Send leader ID
+					args.PrevLogIndex = rf.nextIndex[peer] - 1 //Send the index of the previous log entry for that peer
+					entries_to_send := rf.log[args.PrevLogIndex+1:]
+					args.Entries = entries_to_send //Set the entries list
+					args.LeaderCommit = rf.commitIndex
+					reply.Index = -1 //needed later to see whether AppendEntries ever reached Server
+
 					if args.PrevLogIndex == -1 {
 						args.PrevLogTerm = 0
 						//args.PrevLogIndex = 0
 					} else {
-						args.PrevLogTerm = entries[args.PrevLogIndex].Term
+						args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
 					} //Send the term of the previous log entry
-					entries_to_send := entries[args.PrevLogIndex+1:]
-					args.Entries = entries_to_send //Set the entries list
-
-					args.LeaderCommit = leader_commit
-
-					reply.Index = -1 //needed later to see whether AppendEntries ever reached Server
-
-					/*Print the data stored in args and reply for debugging */
-					// fmt.Println("Server ", leader_id, ": trying to send the entry to server ", peer)
-					// fmt.Println("Server ", leader_id, ": previous log index and term are ", args.PrevLogIndex, args.PrevLogTerm)
-					// fmt.Println("Server ", leader_id, ": entries to send -- ", args.Entries)
-					// fmt.Println("Server ", leader_id, ": commmit index: ", args.LeaderCommit)
+					rf.mu.Unlock()
 
 					/* send an AppendEntries RPC */
 					check := rf.sendAppendEntries(peer, &args, &reply)
@@ -562,13 +555,16 @@ func (rf *Raft) log_replicate(entry *LogEntry) {
 						if reply.Success {
 							fmt.Println("Server ", leader_id, " : Server ", peer, " has replied successfully")
 							rf.mu.Lock() /*Don't need */
-							rf.nextIndex[peer]++
+							rf.matchIndex[peer] = len(rf.log) - 1
+							rf.nextIndex[peer] = len(rf.log)
+							fmt.Println("Match Index: ", rf.matchIndex[peer])
+							fmt.Println("Next Index: ", rf.nextIndex[peer])
 							rf.mu.Unlock()
 							messages <- "success"
 							done_ = true
+							//return
 						} else {
 							fmt.Println("Server ", leader_id, " : Server ", peer, " did not reply successfully")
-							fmt.Println("Server ", leader_id, " will try again")
 
 							/* First check whether I am still a leader */
 							rf.mu.Lock()
@@ -576,19 +572,29 @@ func (rf *Raft) log_replicate(entry *LogEntry) {
 							rf.mu.Unlock()
 							if !leader_flag {
 								fmt.Println("Server ", leader_id, " go routine: no longer leader so I will quit!")
+								messages <- "abort"
 								return
 							}
 
+							rf.mu.Lock()
+							term := rf.currentTerm
+							rf.mu.Unlock()
 							fmt.Println("Server ", leader_id, ": my term ", term, " term from AppendEntries reply: ", reply.Term)
 							if reply.Term > term {
-								fmt.Println("Server ", leader_id, ": I am an outdated leader, need to revert status and quit!")
 								rf.mu.Lock()
-								rf.leader = false
-								rf.votedFor = 999
-								messages <- "failure"
+								rf.currentTerm = reply.Term
 								rf.mu.Unlock()
+								messages <- "abort"
+								fmt.Println("Server ", leader_id, ": I am an outdated leader sent abort!")
 								return
 							}
+
+							rf.mu.Lock()
+							if rf.nextIndex[peer] == len(rf.log) {
+								fmt.Println("I am a straggler thread!")
+								done_ = true
+							}
+							rf.mu.Unlock()
 
 							/* If I am still the leader, then have to retry but look at the conflicting index */
 							//fmt.Println("Server ", leader_id, " the conflicting index: ", reply.Index)
@@ -606,9 +612,12 @@ func (rf *Raft) log_replicate(entry *LogEntry) {
 						rf.mu.Lock()
 						if rf.leader == false {
 							//fmt.Println("Server ", leader_id, ": No longer a leader!")
-							rf.mu.Unlock()
 							done_ = true
-							return
+							//return
+						}
+						if rf.nextIndex[peer] == len(rf.log) {
+							fmt.Println("I am a straggler thread!")
+							done_ = true
 						}
 						rf.mu.Unlock()
 
@@ -618,7 +627,7 @@ func (rf *Raft) log_replicate(entry *LogEntry) {
 
 				/* Maybe use a Waitgroup to wait for a majority ? */
 
-			}(term, leader_id, prevEntry, prevTerm, entries, leader_commit, entry, majority, p)
+			}(leader_id, entry, majority, p)
 		}
 	}
 
@@ -628,23 +637,58 @@ func (rf *Raft) log_replicate(entry *LogEntry) {
 		//fmt.Println("Server ", leader_id, " waiting for a reply from appendEntries go routines")
 		msg := <-messages
 		fmt.Println("Server ", leader_id, " got reply: ", msg)
+		if msg == "abort" {
+			rf.mu.Lock()
+			rf.leader = false
+			rf.votedFor = 999
+			//entries_ := rf.log[0 : rf.commitIndex+1]
+			//rf.log = entries_
+			//fmt.Println("Updated log to previous. Basically, discard previous user entries!")
+			rf.mu.Unlock()
+			return
+
+		}
+		if msg == "succes" {
+			continue
+		}
 	}
 	fmt.Println("Server ", leader_id, ": the majority have appended the new entry or I am no longer leader! ")
 	fmt.Println("Server ", leader_id, ": need to update my commit index or revert leader status")
 
 	rf.mu.Lock()
 	if rf.leader == false {
-		//fmt.Println("Server ", rf.me, ": no longer leader!")
-
-		/* Need to delete old log entries? */
-		entries_ := rf.log[0 : rf.commitIndex+1]
-		rf.log = entries_
 		fmt.Println("Updated log to previous. Basically, discard previous user entries!")
 		rf.mu.Unlock()
 		return
 	}
-	rf.commitIndex = length_log - 1
-	fmt.Println("Server ", rf.me, ": updated commit index to ", rf.commitIndex)
+	//UPDATE COMMIT INDEX PROPERLY
+	goalCommit := rf.commitIndex + 1
+	majorityCommitCount := 0
+	rf.matchIndex[rf.me] = len(rf.log) - 1
+	fmt.Println("Server ", rf.me, " checking whether to update commitIndex")
+	fmt.Println("Goal commit: ", goalCommit)
+	fmt.Println("matchIndex: ", rf.matchIndex)
+	fmt.Println("Log: ", rf.log)
+	for i := goalCommit; i < len(rf.log); i++ {
+		for s := 0; s < len(rf.peers); s++ {
+			if rf.matchIndex[s] >= goalCommit {
+				majorityCommitCount++
+			}
+			if majorityCommitCount >= majority {
+				goalCommit = i
+				break
+			}
+		}
+	}
+	fmt.Println("Current term: ", rf.currentTerm)
+	//fmt.Println("Log commit term: ", rf.log[goalCommit].Term)
+	fmt.Println("Majority count: ", majorityCommitCount)
+	if (goalCommit == 0) || (majorityCommitCount >= rf.majority && rf.log[goalCommit].Term == rf.currentTerm) {
+		rf.commitIndex = goalCommit
+		fmt.Println("Updated commitIndex to ", rf.commitIndex)
+		fmt.Println("Last Applied: ", rf.lastApplied)
+
+	}
 
 	/* Now need to ApplyMsg */
 	for j := rf.lastApplied + 1; j < rf.commitIndex+1; j++ {
@@ -710,18 +754,19 @@ func requestVotes(term_ int, id_ int, peer_id int, channel chan string, rf *Raft
 	rf.mu.Unlock()
 
 	result := RequestVoteReply{}
-	// Information about the RPC
-	// fmt.Println("Server ", rf.me, " about to send an RPC")
-	// fmt.Println("Server ", rf.me, " term: ", args.Term)
-	// fmt.Println("Server ", rf.me, " candidateId: ", args.CandidateId)
-	// fmt.Println("Server ", rf.me, " lastLogIndex: ", args.LastLogIndex)
-	// fmt.Println("Server ", rf.me, " lastLogTerm: ", args.LastLogTerm)
-	// fmt.Println("Server ", rf.me, " last log term in log[]: ", rf.log[args.LastLogIndex].Term)
-	// fmt.Println("Server ", id, " sending a RequestElectionRPC to peer: ", peer_id)
 	result_ := rf.sendRequestVote(peer_id, &args, &result)
 	if result_ {
 		if result.VoteGranted == true {
 			channel <- "success"
+		}
+		if result.Term > term_ {
+			rf.mu.Lock()
+			rf.currentTerm = result.Term
+			rf.mu.Unlock()
+			// fmt.Println("Server ", id_, " updated my term from a resultRPC")
+			// fmt.Println("Old term: ", term_)
+			// fmt.Println("New term: ", result.Term)
+			channel <- "failure"
 		}
 	} else {
 		channel <- "failure"
@@ -731,8 +776,8 @@ func requestVotes(term_ int, id_ int, peer_id int, channel chan string, rf *Raft
 func Heartbeats(term_ int, my_id_ int, num_peers int, rf *Raft) {
 	rf.mu.Lock()
 	leader_flag := rf.leader
-	fmt.Println("Server ", my_id_, ": should I send a heartbeat?")
-	fmt.Println("Server ", my_id_, ": flag is ", leader_flag)
+	//fmt.Println("Server ", my_id_, ": should I send a heartbeat?")
+	//fmt.Println("Server ", my_id_, ": flag is ", leader_flag)
 	rf.mu.Unlock()
 	for leader_flag == true && rf.killed() == false {
 
@@ -742,20 +787,18 @@ func Heartbeats(term_ int, my_id_ int, num_peers int, rf *Raft) {
 
 				go func(id int, term int, peer int) {
 					//Now need to send heartbeats
-					args := AppendEntriesArgs{}
-					args.Term = term
-					args.LeaderId = id
-
-					/* Need to include Commit Index with heartbeats */
-					/* Is this a possible source of failure? */
 					rf.mu.Lock()
-					args.LeaderCommit = rf.commitIndex
+					args := AppendEntriesArgs{
+						Term:         term,
+						LeaderId:     id,
+						LeaderCommit: rf.commitIndex,
+					}
 					rf.mu.Unlock()
 
 					reply := AppendEntriesReply{}
 					//fmt.Println("Server ", my_id_, " sending a heartbeat to Server ", peer)
 					rf.sendAppendEntries(peer, &args, &reply)
-					fmt.Println("Server ", my_id_, " sent a heartbeat to Server ", peer)
+					//fmt.Println("Server ", my_id_, " sent a heartbeat to Server ", peer)
 					return
 				}(my_id_, term_, p)
 			}
@@ -766,24 +809,22 @@ func Heartbeats(term_ int, my_id_ int, num_peers int, rf *Raft) {
 		t := (time.Duration)(50+r.Float64()*20) * time.Millisecond
 		//fmt.Println("Server ", my_id_, ": going to sleep for ", t, " seconds in the heartbeat go routine")
 		time.Sleep(t)
-		fmt.Println("Server ", my_id_, ": woke up in the heartbeat go routine")
+		//fmt.Println("Server ", my_id_, ": woke up in the heartbeat go routine")
 		rf.mu.Lock()
 		leader_flag = rf.leader
-		fmt.Println("Server ", my_id_, ": am I leader? ", leader_flag)
+		//fmt.Println("Server ", my_id_, ": am I leader? ", leader_flag)
 		//sent_heartbeat = false
 		rf.mu.Unlock()
 
 	}
-	//fmt.Println("Server ", my_id_, " I am no longer the leader!")
-	rf.mu.Lock()
-	rf.leader = false
-	rf.mu.Unlock()
+
 	return
 }
 
 func InitializeElection(id int, term int, num_peers int, rf *Raft) {
 	//Set the initial count of votes to 1
 	count := 1
+	fmt.Println("IE: ", id)
 
 	//Step 1: Go routine to requestVotes to peers
 	c1 := make(chan string, num_peers-1)
@@ -809,27 +850,39 @@ func InitializeElection(id int, term int, num_peers int, rf *Raft) {
 		select {
 		case res := <-c1:
 			if res == "success" {
-				//fmt.Println("Server ", id, " got a positive result")
+				fmt.Println("Server ", id, " got a positive result")
 				count++
+				if count >= rf.majority {
+					//fmt.Println("Got majority counts!")
+					break
+				}
 			}
 
-		case <-time.After((time.Duration)(r0.Float64()*10) * time.Millisecond):
-			//fmt.Println("Server ", id, " timeout for the result from RequestVoteRPC")
+		case <-time.After((time.Duration)(r0.Float64()*20) * time.Millisecond):
+			fmt.Println("Server ", id, " timeout for the result from RequestVoteRPC")
 		}
 	}
 
 	//Won Election!
 	if count >= rf.majority {
 
-		//fmt.Println("Server ", id, ": I have been elected a leader!")
+		fmt.Println("Server ", id, ": I have been elected a leader!")
 		rf.mu.Lock()
 		rf.leader = true
 		//last_applied := rf.lastApplied + 1
 		//fmt.Println("Server ", id, ": resetting all match indices to ", len(rf.log))
 		for i := 0; i < len(rf.peers); i++ {
-			rf.matchIndex = append(rf.matchIndex, 0) //Setting up these two arrays for the leader
 			rf.nextIndex = append(rf.nextIndex, len(rf.log))
 		}
+		if len(rf.matchIndex) == 0 {
+			//fmt.Println("Need to initialize matchIndex")
+			for i := 0; i < len(rf.peers); i++ {
+				rf.matchIndex = append(rf.matchIndex, 0) //Setting up these two arrays for the leader
+			}
+		}
+		// fmt.Println("IE nextIndex: ", rf.nextIndex)
+		// fmt.Println("IE matchIndex: ", rf.matchIndex)
+
 		rf.mu.Unlock()
 		//fmt.Println("Server ", id, ": need to send heartbeats now?!")
 
@@ -881,7 +934,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.applyCh = applyCh
-	// Your initialization code here (2A, 2B, 2C).
 
 	rf.currentTerm = 0
 	rf.votedFor = 999 //999 signifies a null entity since golang does not have a NULL for ints
@@ -894,14 +946,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	//Add a go routine for leader election purposes
 	go func() {
 
-		//fmt.Println("Server ", rf.me, ": number of peers: ", len(rf.peers))
-		//fmt.Println("Server ", rf.me, ": peers --", rf.peers)
-		//for i:= 0; i < len(rf.peers); i++ {
-		//fmt.Println("Server ", rf.me, " peer -- ", rf.peers[i])
-		//}
-		//fmt.Println("Server ", rf.me, ": majority: ", rf.majority )
-		//fmt.Println("Server ", rf.me, ": initializing a timer" )
-
 		for finished != true || rf.killed() != true {
 
 			//Generating a generator and feeding it a seed that is non-constant
@@ -911,17 +955,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			t := (time.Duration)(300+r.Float64()*100) * time.Millisecond
 			//fmt.Println("Server ", rf.me, ": going to sleep for ", t, " seconds")
 			time.Sleep(t)
-			fmt.Println("Server ", rf.me, ": woke up")
+			//fmt.Println("Server ", rf.me, ": woke up")
 
 			rf.mu.Lock()
 			//Case 1: Have not received any heartbeats and I am not a leader
 			if rf.leader == false && rf.heartbeat == false && rf.killed() == false {
-				fmt.Println("Server ", rf.me, ": did not receive a heartbeat!")
-				fmt.Println("Server ", rf.me, ": need to start an election")
+				//fmt.Println("Server ", rf.me, ": did not receive a heartbeat!")
+				//fmt.Println("Server ", rf.me, ": need to start an election")
 
 				//Need to send RequestVoteRPCs to all servers
 				rf.currentTerm++    //increment my term
 				rf.votedFor = rf.me //vote for myself
+				rf.lastAppendEntriesID = 999
 				//rf.mu.Unlock()
 
 				go func(id int, term int, num_peers int, rf *Raft) {
@@ -938,7 +983,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				//rf.votedFor = 999			//set the votedFor back to null: we will switch it to back to leader's if a heartbeat is received
 				rf.mu.Unlock() // if a heartbeat is not received, then it means that the state will move forward when we receive a new election request
 			} else if rf.leader == true && rf.killed() == false {
-				fmt.Println("Server ", rf.me, "I am still leader and I have not been killed!")
+				//fmt.Println("Server ", rf.me, "I am still leader and I have not been killed!")
 				rf.mu.Unlock()
 				continue
 			} else {

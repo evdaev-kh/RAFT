@@ -228,8 +228,11 @@ func TestFailNoAgree2B(t *testing.T) {
 	// 3 of 5 followers disconnect
 	leader := cfg.checkOneLeader()
 	cfg.disconnect((leader + 1) % servers)
+	fmt.Println("Tester: disconnect server ", (leader+1)%servers)
 	cfg.disconnect((leader + 2) % servers)
+	fmt.Println("Tester: disconnect server ", (leader+2)%servers)
 	cfg.disconnect((leader + 3) % servers)
+	fmt.Println("Tester: disconnect server ", (leader+3)%servers)
 
 	index, _, ok := cfg.rafts[leader].Start(20)
 	if ok != true {
@@ -248,8 +251,11 @@ func TestFailNoAgree2B(t *testing.T) {
 
 	// repair
 	cfg.connect((leader + 1) % servers)
+	fmt.Println("Tester: reconnect server ", (leader+1)%servers)
 	cfg.connect((leader + 2) % servers)
+	fmt.Println("Tester: reconnect server ", (leader+2)%servers)
 	cfg.connect((leader + 3) % servers)
+	fmt.Println("Tester: reconnect server ", (leader+3)%servers)
 
 	// the disconnected majority may have chosen a leader from
 	// among their own ranks, forgetting index 2.
@@ -400,14 +406,12 @@ func TestRejoin2B(t *testing.T) {
 	cfg.connect(leader1)
 	fmt.Println("Tester: Reconnected leader 1", leader1)
 	fmt.Println("Tester: Leader 2 is ", leader2)
-	//return
 
 	fmt.Println("Tester: Entry with command 104 index = 2?")
 	fmt.Println("Tester: Leader 1 is ", leader1)
 	fmt.Println("Tester: Leader 2 is ", leader2)
 	//time.Sleep(RaftElectionTimeout)
 	cfg.one(104, 2, true)
-	//return
 
 	// all together now
 	cfg.connect(leader2)
@@ -427,6 +431,7 @@ func TestRejoin2B(t *testing.T) {
 func TestBackup2B(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, false, false)
+	numCommands := 50
 	defer cfg.cleanup()
 
 	cfg.begin("Test (2B): leader backs up quickly over incorrect follower logs")
@@ -436,39 +441,50 @@ func TestBackup2B(t *testing.T) {
 	// put leader and one follower in a partition
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect((leader1 + 2) % servers)
+	fmt.Println("TESTER: Disconnected ", (leader1+2)%servers)
 	cfg.disconnect((leader1 + 3) % servers)
+	fmt.Println("TESTER: Disconnected ", (leader1+3)%servers)
 	cfg.disconnect((leader1 + 4) % servers)
+	fmt.Println("TESTER: Disconnected ", (leader1+4)%servers)
 
 	// submit lots of commands that won't commit
-	for i := 0; i < 50; i++ {
+	for i := 0; i < numCommands; i++ {
 		cfg.rafts[leader1].Start(rand.Int())
 	}
 
 	time.Sleep(RaftElectionTimeout / 2)
 
 	cfg.disconnect((leader1 + 0) % servers)
+	fmt.Println("TESTER: Disconnected ", (leader1+0)%servers)
 	cfg.disconnect((leader1 + 1) % servers)
+	fmt.Println("TESTER: Disconnected ", (leader1+1)%servers)
 
 	// allow other partition to recover
 	cfg.connect((leader1 + 2) % servers)
+	fmt.Println("TESTER: Reconnected ", (leader1+2)%servers)
 	cfg.connect((leader1 + 3) % servers)
+	fmt.Println("TESTER: Reconnected ", (leader1+3)%servers)
 	cfg.connect((leader1 + 4) % servers)
+	fmt.Println("TESTER: Reconnected ", (leader1+4)%servers)
 
 	// lots of successful commands to new group.
-	for i := 0; i < 50; i++ {
+	for i := 0; i < numCommands; i++ {
 		cfg.one(rand.Int(), 3, true)
 	}
 
 	// now another partitioned leader and one follower
 	leader2 := cfg.checkOneLeader()
+	fmt.Println("TESTER: Leader 2 ", leader2)
+	fmt.Println("TESTER: Leader 1 ", leader1)
 	other := (leader1 + 2) % servers
 	if leader2 == other {
 		other = (leader2 + 1) % servers
 	}
 	cfg.disconnect(other)
+	fmt.Println("TESTER: Disconnected other: ", other)
 
 	// lots more commands that won't commit
-	for i := 0; i < 50; i++ {
+	for i := 0; i < numCommands; i++ {
 		cfg.rafts[leader2].Start(rand.Int())
 	}
 
@@ -477,15 +493,20 @@ func TestBackup2B(t *testing.T) {
 	// bring original leader back to life,
 	for i := 0; i < servers; i++ {
 		cfg.disconnect(i)
+		fmt.Println("TESTER: Disconnect ", i)
 	}
 	cfg.connect((leader1 + 0) % servers)
+	fmt.Println("TESTER: Reconnected ", (leader1+0)%servers)
 	cfg.connect((leader1 + 1) % servers)
+	fmt.Println("TESTER: Reconnected ", (leader1+1)%servers)
 	cfg.connect(other)
+	fmt.Println("TESTER: Reconnected ", other)
 
 	// lots of successful commands to new group.
-	for i := 0; i < 50; i++ {
+	for i := 0; i < numCommands; i++ {
 		cfg.one(rand.Int(), 3, true)
 	}
+	fmt.Println("TESTER: Partition 2 Agreed ")
 
 	// now everyone
 	for i := 0; i < servers; i++ {

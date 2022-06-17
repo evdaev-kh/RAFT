@@ -1,0 +1,14 @@
+RAFT B
+
+- add a separate message of abort to send to a channel when you change your leader status	(DONE)
+- do you revert your leader status despite having a higher commit index?			(Yes)
+- does a heartbeat feature some log entries? (L: 1 2 3 F: )					(No)
+
+- RequestVoteRPC taking too long for disconnect servers. A third partition can't choose a leader! (Fixed)
+
+06.17.22
+
+- ConcurrentStarts2B test failing about half of the time. I suspect that is to do with the heartbeat mechanism for commiting
+entries and with the AppendEntries logic for the server. Need to review and fix it.
+- Add  eatures to make it easier to debug.
+- Refine the code
